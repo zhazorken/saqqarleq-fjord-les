@@ -1,0 +1,23 @@
+# generated output / large files (never commit) — but DO keep bottom.nc (the bathymetry input)
+output/
+logs/
+*.jld2
+checkpoint_*
+*_fields.nc
+*_face*.nc
+*_midy.nc
+*_mooring.nc
+*_xsect.nc
+*_timeavg.nc
+*.mp4
+*.gif
+
+# resolved Julia manifest: let each machine (laptop vs cluster) resolve fresh
+Manifest.toml
+Manifest.toml.*
+
+# misc
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
