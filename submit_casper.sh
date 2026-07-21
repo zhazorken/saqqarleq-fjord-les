@@ -6,8 +6,7 @@
 #PBS -e logs/saqq_cg.err
 #PBS -l walltime=24:00:00
 #PBS -q casper
-#PBS -l select=1:ncpus=1:mem=40GB:ngpus=1
-#PBS -l gpu_type=v100
+#PBS -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=v100
 #PBS -M kenzhao@unc.edu
 #PBS -m abe
 #
@@ -26,13 +25,16 @@ cd "$PBS_O_WORKDIR" || exit 1
 mkdir -p logs
 
 # Exactly the module stack your Dec-2024 run used (proven to work on Casper).
+# NOTE: use a juliaup Julia >= 1.10.11, NOT the julia/1.10.5 module (its Pkg resolver writes a
+# broken Manifest — KeyError "GPUArraysCore"). Ovall26 used 1.10.11 for the same reason.
 module purge
 module load ncarenv/23.10
-module load julia/1.10.5 cuda
+module load cuda
 module load peak-memusage
 module list
 
 export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-/glade/work/$USER/.julia}"
+JULIA="${JULIA:-$HOME/.juliaup/bin/julia}"
 
 CASE=${CASE:-control}
 case "$CASE" in
@@ -49,7 +51,7 @@ mkdir -p "$OUTDIR"
 
 # --wall_time_limit stops cleanly ~30 min before the 24 h PBS wall so the checkpoint is complete;
 # resubmitting the same CASE then picks up from it. --stop_days=10 matches the original run length.
-peak_memusage julia --project iceplume.jl \
+peak_memusage $JULIA --project iceplume.jl \
     --simname="$CASE" $FLAGS --arch=gpu --outdir="$OUTDIR" \
     --stop_days=10 --wall_time_limit=23.5 \
     2>&1 | tee logs/${CASE}.out

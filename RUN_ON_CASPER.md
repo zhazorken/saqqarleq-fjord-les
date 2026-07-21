@@ -21,27 +21,36 @@ rsync -avh --exclude output/ --exclude logs/ \
 This includes `bottom.nc` (the bathymetry). (Alternatively, once the repo is public:
 `git clone <url> /glade/work/kenzhao/saqqarleq-fjord-les`.)
 
-## 2. Set up the Julia environment once (Casper login node)
+## 2. Install Julia and set up the environment (once, Casper login node)
+
+Casper's `julia/1.10.5` module has a broken Pkg resolver (`KeyError "GPUArraysCore"`), so use a
+juliaup Julia >= 1.10.11 (what Ovall26 used):
 
 ```bash
+curl -fsSL https://install.julialang.org | sh -s -- --yes
+source ~/.bashrc
+juliaup add 1.10 && juliaup default 1.10
+
 cd /glade/work/kenzhao/saqqarleq-fjord-les
-./setup_casper.sh
+bash setup_casper.sh
 ```
 
-Resolves Oceananigans 0.109 into `/glade/work/kenzhao/.julia` and precompiles. Do this on a login
-node (it needs network for `Pkg`). Takes a while the first time.
+`setup_casper.sh` uses `~/.juliaup/bin/julia`, resolves Oceananigans 0.109 into
+`/glade/work/kenzhao/.julia`, and precompiles. Do it on a login node (needs network for `Pkg`).
+Takes a while the first time. If you had already run the 1.10.5 module, `rm -f Manifest.toml`
+first so 1.10.11 resolves cleanly.
 
 ## 3. Quick GPU sanity check (a couple of minutes)
 
 Confirms it builds and steps on the GPU with the CG solver before spending queue time.
 
 ```bash
-qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1 -l gpu_type=v100 -l walltime=00:30:00
+qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=v100 -l walltime=00:30:00
 # on the compute node:
 cd /glade/work/kenzhao/saqqarleq-fjord-les
-module purge; module load ncarenv/23.10 julia/1.10.5 cuda
+module purge; module load ncarenv/23.10 cuda
 export JULIA_DEPOT_PATH=/glade/work/kenzhao/.julia
-julia --project iceplume.jl --arch=gpu --simname=gpucheck --stop_days=0.01
+~/.juliaup/bin/julia --project iceplume.jl --arch=gpu --simname=gpucheck --stop_days=0.01
 ```
 
 Watch for: "Model built", the CG solver converging, `max|u|` growing (not NaN). Then `exit`.
