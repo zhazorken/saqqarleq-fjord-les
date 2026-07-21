@@ -1,37 +1,40 @@
 #!/bin/bash -l
 #PBS -A UGIT0046
-#PBS -N saqq_fjord
-#PBS -o logs/saqq_fjord.log
-#PBS -j oe
-#PBS -l walltime=11:59:00
+#PBS -N saqq_cg
+#PBS -k eod
+#PBS -o logs/saqq_cg.out
+#PBS -e logs/saqq_cg.err
+#PBS -l walltime=24:00:00
 #PBS -q casper
-#PBS -l select=1:ncpus=4:mem=60gb:ngpus=1:gpu_type=a100
+#PBS -l select=1:ncpus=1:mem=40GB:ngpus=1
+#PBS -l gpu_type=v100
 #PBS -M kenzhao@unc.edu
-#PBS -m ae
-#PBS -r n
+#PBS -m abe
 #
-# One job = one scenario. Pick with -v CASE=:
-#     qsub -v CASE=control submit_casper.sh     # constant discharge, no tide  (default)
-#     qsub -v CASE=tide    submit_casper.sh     # constant discharge + external M2 tide
-#     qsub -v CASE=pump    submit_casper.sh     # tidally modulated discharge (Varying-SGD)
-#     qsub -v CASE=tidepump submit_casper.sh    # both together
-# Override Julia / output dir:  -v CASE=pump,JULIA=/path/to/julia,OUTDIR=/glade/derecho/scratch/$USER/saqq
+# Same environment as your outerpump3/outertide3 runs (ncarenv 23.10 + julia/1.10.5 + cuda +
+# peak-memusage, v100, 40 GB, 24 h). The ONLY change from the originals is that iceplume.jl now
+# uses the ConjugateGradientPoissonSolver. Pick the scenario with -v CASE=:
 #
-# ~25 M cells (522×604×80). No HPC modules needed: CUDA.jl bundles its toolkit and uses the GPU
-# node's driver. Do NOT force-purge/load a fixed ncarenv (pulls a broken openmpi on Casper).
-# `--pkgimages=no` avoids a known cluster precompile issue.
+#     qsub -v CASE=control  submit_casper.sh     # constant discharge, no tide   (default)
+#     qsub -v CASE=tide     submit_casper.sh     # constant discharge + M2 tide
+#     qsub -v CASE=pump     submit_casper.sh     # tidally modulated discharge
+#     qsub -v CASE=tidepump submit_casper.sh     # both
+#
+# Account is UGIT0046 (your current plume/DNS allocation). Everything else matches the originals.
 
 cd "$PBS_O_WORKDIR" || exit 1
 mkdir -p logs
 
-JULIA="${JULIA:-julia}"
+# Exactly the module stack your Dec-2024 run used (proven to work on Casper).
+module purge
+module load ncarenv/23.10
+module load julia/1.10.5 cuda
+module load peak-memusage
+module list
+
 export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-/glade/work/$USER/.julia}"
-echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES ; Julia: $($JULIA --version 2>/dev/null)"
 
 CASE=${CASE:-control}
-OUTDIR="${OUTDIR:-/glade/work/$USER/saqq_fjord_runs/$CASE}"
-mkdir -p "$OUTDIR"
-
 case "$CASE" in
   control)  FLAGS="--tide=0 --pump=0" ;;
   tide)     FLAGS="--tide=1 --pump=0" ;;
@@ -40,10 +43,13 @@ case "$CASE" in
   *) echo "unknown CASE='$CASE' (control|tide|pump|tidepump)"; exit 1 ;;
 esac
 
-# Auto-resumes from a checkpoint in OUTDIR if the same job is re-submitted with the same CASE.
-time $JULIA --project --pkgimages=no iceplume.jl \
-    --simname="$CASE" $FLAGS --outdir="$OUTDIR" \
-    --stop_days=10 --wall_time_limit=11.5 \
-    2>&1 | tee logs/${CASE}.out
+# Outputs + checkpoints for this case (kept out of the git repo; auto-resumes if resubmitted).
+OUTDIR="${OUTDIR:-$PBS_O_WORKDIR/output/$CASE}"
+mkdir -p "$OUTDIR"
 
-qstat -f $PBS_JOBID >> logs/saqq_fjord.log
+# --wall_time_limit stops cleanly ~30 min before the 24 h PBS wall so the checkpoint is complete;
+# resubmitting the same CASE then picks up from it. --stop_days=10 matches the original run length.
+peak_memusage julia --project iceplume.jl \
+    --simname="$CASE" $FLAGS --arch=gpu --outdir="$OUTDIR" \
+    --stop_days=10 --wall_time_limit=23.5 \
+    2>&1 | tee logs/${CASE}.out

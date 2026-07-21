@@ -48,6 +48,15 @@ section, `*_timeavg.nc` 6 h average) and checkpoints are written to `--outdir` (
 `./output`, kept out of the repo). Runs auto-resume from a checkpoint if resubmitted with the
 same `--simname`.
 
+Quick-look plots (mooring time-depth Hovmoller, along-fjord section, plan-view speed):
+
+```bash
+python plot_quicklook.py control --dir output/control
+```
+
+The full Casper workflow (setup, GPU sanity check, submit, monitor, resume, fetch) is in
+`RUN_ON_CASPER.md`.
+
 ## Key flags
 
 | flag | default | meaning |

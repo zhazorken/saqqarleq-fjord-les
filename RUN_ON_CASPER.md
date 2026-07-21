@@ -1,0 +1,87 @@
+# Running a scenario on Casper (NCAR)
+
+Same environment as your `outerpump3`/`outertide3` runs (ncarenv 23.10 + julia/1.10.5 + cuda +
+peak-memusage, v100, 40 GB, 24 h). The only physics change is the `ConjugateGradientPoissonSolver`
+in `iceplume.jl`. Below runs the **control** case; swap `CASE=control` for `tide`, `pump`, or
+`tidepump`.
+
+## 0. Allocation
+
+`submit_casper.sh` and the interactive command below use `-A UGIT0046` (your current plume/DNS
+allocation). Everything else matches the original runs.
+
+## 1. Copy the code to Casper (run on your laptop)
+
+```bash
+rsync -avh --exclude output/ --exclude logs/ \
+  ~/Desktop/saqqarleq-fjord-les/ \
+  kenzhao@data-access.ucar.edu:/glade/work/kenzhao/saqqarleq-fjord-les/
+```
+
+This includes `bottom.nc` (the bathymetry). (Alternatively, once the repo is public:
+`git clone <url> /glade/work/kenzhao/saqqarleq-fjord-les`.)
+
+## 2. Set up the Julia environment once (Casper login node)
+
+```bash
+cd /glade/work/kenzhao/saqqarleq-fjord-les
+./setup_casper.sh
+```
+
+Resolves Oceananigans 0.109 into `/glade/work/kenzhao/.julia` and precompiles. Do this on a login
+node (it needs network for `Pkg`). Takes a while the first time.
+
+## 3. Quick GPU sanity check (a couple of minutes)
+
+Confirms it builds and steps on the GPU with the CG solver before spending queue time.
+
+```bash
+qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1 -l gpu_type=v100 -l walltime=00:30:00
+# on the compute node:
+cd /glade/work/kenzhao/saqqarleq-fjord-les
+module purge; module load ncarenv/23.10 julia/1.10.5 cuda
+export JULIA_DEPOT_PATH=/glade/work/kenzhao/.julia
+julia --project iceplume.jl --arch=gpu --simname=gpucheck --stop_days=0.01
+```
+
+Watch for: "Model built", the CG solver converging, `max|u|` growing (not NaN). Then `exit`.
+
+## 4. Submit the production run
+
+```bash
+cd /glade/work/kenzhao/saqqarleq-fjord-les
+qsub -v CASE=control submit_casper.sh
+qstat -u kenzhao
+```
+
+One v100 job, 10 model days or a clean stop ~30 min before the 24 h wall (whichever first).
+
+## 5. Monitor
+
+```bash
+tail -f logs/control.out
+```
+
+Healthy signs: CFL staying < 0.5, the CG Poisson solver converging each step, no NaNs. Outputs
+land in `output/control/` (`control_face*.nc`, `control_mooring.nc`, `control_xsect.nc`,
+`control_timeavg.nc`) plus `checkpoint_control_*`.
+
+## 6. If it hits the wall before 10 days, resume
+
+```bash
+qsub -v CASE=control submit_casper.sh
+```
+
+Same command: it finds the checkpoint in `output/control/` and picks up automatically.
+
+## 7. Pull results back to your laptop
+
+```bash
+mkdir -p ~/Desktop/Sanchez26Sarqar/cg_runs/control
+rsync -avh --exclude 'checkpoint_*' \
+  'kenzhao@data-access.ucar.edu:/glade/work/kenzhao/saqqarleq-fjord-les/output/control/*.nc' \
+  ~/Desktop/Sanchez26Sarqar/cg_runs/control/
+```
+
+Then compare against the original `outer` run to confirm the CG solver removed the spurious
+near-bathymetry tracer signal.

@@ -1,27 +1,29 @@
 #!/bin/bash -l
-# setup_casper.sh — one-time environment setup on Casper (NCAR), run from the repo directory.
-# Resolves + precompiles the Oceananigans 0.109 / Julia 1.10 environment for the GPU runs.
+# setup_casper.sh — one-time environment setup on Casper (NCAR), run from the repo directory on a
+# LOGIN node (needs network for Pkg). Uses the same modules as your production runs and resolves
+# the Oceananigans 0.109 environment fresh (no Manifest is shipped).
 #
-#   git clone <your-repo-url> saqqarleq-fjord-les && cd saqqarleq-fjord-les
-#   JULIA=/path/to/julia ./setup_casper.sh
-#   qsub -v CASE=control submit_casper.sh
+#   cd /glade/work/$USER/saqqarleq-fjord-les
+#   ./setup_casper.sh
 set -e
 cd "$(dirname "$0")"
 
-# Instantiating packages needs NO HPC modules (CUDA.jl bundles its own toolkit; the GPU driver is
-# only needed at run time). If `which julia` is empty, install juliaup (Julia >= 1.10) first:
-#   curl -fsSL https://install.julialang.org | sh -s -- --yes && source ~/.bashrc
-JULIA="${JULIA:-julia}"
-command -v "$JULIA" >/dev/null 2>&1 || { echo "ERROR: '$JULIA' not found — install Julia >= 1.10 first."; exit 1; }
-echo "Julia: $($JULIA --version)   depot: ${JULIA_DEPOT_PATH:-$HOME/.julia}"
+module purge
+module load ncarenv/23.10
+module load julia/1.10.5 cuda
+module list
 
-# No Manifest is shipped, so this resolves Oceananigans 0.109.x fresh, then precompiles.
-$JULIA --project -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-/glade/work/$USER/.julia}"
+echo "Julia: $(julia --version)   depot: $JULIA_DEPOT_PATH"
+
+# Resolve + precompile (adds Oceananigans 0.109, NCDatasets, Interpolations, etc. to the depot).
+julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 
 echo
-echo "Environment ready. Quick GPU sanity check (a couple of minutes):"
-echo "    $JULIA --project --pkgimages=no iceplume.jl --arch=gpu --simname=gpucheck --stop_days=0.01"
-echo "Then submit the production runs:"
-echo "    qsub -v CASE=control submit_casper.sh"
-echo "    qsub -v CASE=tide    submit_casper.sh"
-echo "    qsub -v CASE=pump    submit_casper.sh"
+echo "Environment ready. Quick GPU sanity check on a compute node (a couple of minutes):"
+echo "    qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1 -l gpu_type=v100 -l walltime=00:30:00"
+echo "    # then on the node:"
+echo "    module load ncarenv/23.10 julia/1.10.5 cuda"
+echo "    export JULIA_DEPOT_PATH=/glade/work/\$USER/.julia"
+echo "    julia --project iceplume.jl --arch=gpu --simname=gpucheck --stop_days=0.01"
+echo "Then submit the real run:  qsub -v CASE=control submit_casper.sh"
