@@ -58,9 +58,9 @@ function parse_cli()
         "pump_amp"   => 0.5,         # modulation fraction A in (1 + A*sin(2π t/T)); matches outerpump3
         "tide_amp"   => 0.0168,      # barotropic M2 velocity amplitude [m/s]; matches outertide3
         "M2_period"  => 44700.0,     # M2 tidal period [s] (12.42 h) — used by both pump and tide
-        # --- domain / grid (reference "outer" run) ---
+        # --- domain / grid (domain from the reference "outer" run) ---
         "Lx" => 12937.0, "Ly" => 15039.0, "Lz" => 200.0,
-        "Nx" => 522.0,   "Ny" => 604.0,   "Nz" => 80.0,
+        "Nx" => 430.0,   "Ny" => 500.0,   "Nz" => 80.0,   # ~30 m horizontal (was 522×604 ≈ 25 m)
         # --- bathymetry ---
         "bathymetry" => "bottom.nc", "bathy_var" => "bottom",
         # --- run control ---
@@ -72,7 +72,7 @@ function parse_cli()
         "wall_time_limit"    => Inf,      # hours; stop cleanly before the PBS wall time
         "outdir"             => "",       # empty => <rundir>/output
         # --- CG Poisson solver knobs ---
-        "cg_reltol" => 1e-5, "cg_maxiter" => 50.0)
+        "cg_reltol" => 1e-4, "cg_maxiter" => 50.0)   # 1e-4: fewer CG iterations per step, faster
     provided = Set{String}()
     for a in ARGS
         startswith(a, "--") || continue
@@ -322,7 +322,11 @@ gattrs = Dict("scenario" => (pump_on ? (tide_on ? "tide+pump" : "pump") : (tide_
 
 # Clamp all fixed indices to the grid so a coarse CPU smoke-test grid can't hit out-of-bounds.
 @inline ci(i, N) = clamp(i, 1, N)
-moor_ix, moor_iy = ci(402, Nx), ci(13, Ny)
+# Mooring / x-section at a FIXED PHYSICAL location (≈ original index (402,13) on the 522×604 grid),
+# computed from the grid so they stay at the same spot when the horizontal resolution changes.
+x_moor, y_moor = 9950.0, 324.0     # m
+moor_ix = ci(round(Int, x_moor / Lx * Nx), Nx)
+moor_iy = ci(round(Int, y_moor / Ly * Ny), Ny)
 
 zfaces = Dict("face1"=>32, "face2"=>50, "face3"=>70, "face4"=>75, "face5"=>Nz-1)
 for (name, k) in zfaces

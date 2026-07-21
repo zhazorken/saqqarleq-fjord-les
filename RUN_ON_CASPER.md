@@ -1,9 +1,9 @@
 # Running a scenario on Casper (NCAR)
 
-Same environment as your `outerpump3`/`outertide3` runs (ncarenv 23.10 + julia/1.10.5 + cuda +
-peak-memusage, v100, 40 GB, 24 h). The only physics change is the `ConjugateGradientPoissonSolver`
-in `iceplume.jl`. Below runs the **control** case; swap `CASE=control` for `tide`, `pump`, or
-`tidepump`.
+Close to your `outerpump3`/`outertide3` runs (ncarenv 23.10 + cuda + peak-memusage, 40 GB, 24 h),
+but on an A100 with a juliaup Julia >= 1.10.11 and the `ConjugateGradientPoissonSolver` in
+`iceplume.jl` (`cg_reltol` 1e-4, ~30 m horizontal grid). Below runs the **control** case; swap
+`CASE=control` for `tide`, `pump`, or `tidepump`.
 
 ## 0. Allocation
 
@@ -45,7 +45,7 @@ first so 1.10.11 resolves cleanly.
 Confirms it builds and steps on the GPU with the CG solver before spending queue time.
 
 ```bash
-qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=v100 -l walltime=00:30:00
+qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=a100 -l walltime=00:30:00
 # on the compute node:
 cd /glade/work/kenzhao/saqqarleq-fjord-les
 module purge; module load ncarenv/23.10 cuda
@@ -63,7 +63,7 @@ qsub -v CASE=control submit_casper.sh
 qstat -u kenzhao
 ```
 
-One v100 job, 10 model days or a clean stop ~30 min before the 24 h wall (whichever first).
+One A100 job, 10 model days or a clean stop ~30 min before the 24 h wall (whichever first).
 
 ## 5. Monitor
 

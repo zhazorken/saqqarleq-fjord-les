@@ -6,13 +6,13 @@
 #PBS -e logs/saqq_cg.err
 #PBS -l walltime=24:00:00
 #PBS -q casper
-#PBS -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=v100
+#PBS -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=a100
 #PBS -M kenzhao@unc.edu
 #PBS -m abe
 #
-# Same environment as your outerpump3/outertide3 runs (ncarenv 23.10 + julia/1.10.5 + cuda +
-# peak-memusage, v100, 40 GB, 24 h). The ONLY change from the originals is that iceplume.jl now
-# uses the ConjugateGradientPoissonSolver. Pick the scenario with -v CASE=:
+# Close to your outerpump3/outertide3 runs (ncarenv 23.10 + cuda + peak-memusage, 40 GB, 24 h),
+# but on an A100 with a juliaup Julia >= 1.10.11, and iceplume.jl now uses the
+# ConjugateGradientPoissonSolver (cg_reltol 1e-4) at ~30 m horizontal. Pick the scenario with -v CASE=:
 #
 #     qsub -v CASE=control  submit_casper.sh     # constant discharge, no tide   (default)
 #     qsub -v CASE=tide     submit_casper.sh     # constant discharge + M2 tide

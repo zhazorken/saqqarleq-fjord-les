@@ -48,15 +48,6 @@ section, `*_timeavg.nc` 6 h average) and checkpoints are written to `--outdir` (
 `./output`, kept out of the repo). Runs auto-resume from a checkpoint if resubmitted with the
 same `--simname`.
 
-Quick-look plots (mooring time-depth Hovmoller, along-fjord section, plan-view speed):
-
-```bash
-python plot_quicklook.py control --dir output/control
-```
-
-The full Casper workflow (setup, GPU sanity check, submit, monitor, resume, fetch) is in
-`RUN_ON_CASPER.md`.
-
 ## Key flags
 
 | flag | default | meaning |
@@ -68,10 +59,10 @@ The full Casper workflow (setup, GPU sanity check, submit, monitor, resume, fetc
 | `--tide_amp` | `0.0168` | barotropic M2 velocity amplitude [m/s] (matches outertide3) |
 | `--M2_period` | `44700` | tidal period [s] (12.42 h) |
 | `--stop_days` | `10` | model run length |
-| `--Nx --Ny --Nz` | `522 604 80` | grid (domain 12937 × 15039 × 200 m) |
+| `--Nx --Ny --Nz` | `430 500 80` | grid (~30 m horizontal; domain 12937 × 15039 × 200 m) |
 | `--bathymetry` | `bottom.nc` | bathymetry file (var `--bathy_var`, default `bottom`) |
 | `--outdir` | `<rundir>/output` | output + checkpoint directory |
-| `--cg_reltol --cg_maxiter` | `1e-5` / `50` | CG Poisson solver tolerance / iteration cap |
+| `--cg_reltol --cg_maxiter` | `1e-4` / `50` | CG Poisson solver tolerance / iteration cap |
 
 ## Inputs
 

@@ -27,7 +27,7 @@ $JULIA --project -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 
 echo
 echo "Environment ready. Quick GPU sanity check on a compute node (a couple of minutes):"
-echo "    qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=v100 -l walltime=00:30:00"
+echo "    qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=a100 -l walltime=00:30:00"
 echo "    # then on the node:"
 echo "    module load ncarenv/23.10 cuda"
 echo "    export JULIA_DEPOT_PATH=/glade/work/\$USER/.julia"
