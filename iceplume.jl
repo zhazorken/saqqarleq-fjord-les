@@ -1,24 +1,28 @@
 # =====================================================================================
-# Saqqarleq internal-wave-permitting fjord LES — Oceananigans 0.109 / Julia >= 1.10.11
+# iceplume.jl — Saqqarleq internal-wave-permitting fjord LES — Oceananigans 0.109 / Julia >= 1.10.11
 #
-# Rebuilt on the NEWER, fast architecture (outerpump3/outerpump6), which runs at Δt ~ 10 s
-# instead of the legacy `outer` run's ~0.22 s. The old `outer` forced the plume through a strong
-# interior sponge, which manufactured a ~6 m/s spurious vertical velocity and pinned the timestep
-# 40× too small. The newer runs inject the plume through the SOUTH open boundary (smooth inflow),
-# use gentle far-field sponges (σ = 8000 s), no subgrid closure, and a hydrostatic-pressure-anomaly
-# split. Here we keep all of that AND add the ConjugateGradientPoissonSolver (the immersed-boundary
-# tracer fix), on RungeKutta3 for open-boundary stability (3 CG solves/step is the price).
+# ONE script, all scenarios (--tide, --pump), ONE plume architecture: a CLOSED domain with the
+# subglacial discharge injected as a distributed INTERIOR SOURCE at its neutral-buoyancy outflow
+# depth (~ -17 m), balanced by an outflow sponge at the fjord mouth. The near-terminus rising plume
+# is handled by a separate plume LES (Zhao et al. 2024); this model receives the detached outflow.
 #
-# Scenarios (flags):
-#   Control      (default)    steady discharge, no tide
-#   Pump         --pump=1     tidally modulated discharge  v_p1 × (1 + A·sin(2π t/T))
-#   Tide         --tide=1     + external barotropic M2 tide at the fjord mouth
+# Pressure solver:
+#   default   ConjugateGradientPoissonSolver — enforces the immersed no-normal-flow condition in the
+#             pressure projection, removing the spurious near-bathymetry tracer signal. This is the
+#             production solver. Tune with --cg_reltol / --cg_maxiter.
+#   --fft=1   Oceananigans' default FFT pressure solve instead. Same closed-domain interior-source
+#             run, but with the known immersed-bottom tracer artifact — kept as an opt-in cross-check
+#             against the earlier FFT results. A well-posed closed domain is why FFT works here too
+#             (net divergence ~0); the artifact is solver-intrinsic, not an inflow issue.
 #
-# Plume/boundary/forcing functions are ported verbatim from outerpump3 (a proven run). Bathymetry
-# is resampled from bottom.nc onto the grid, so the same file works at any resolution / arch.
+# Δt is governed by how concentrated the source is: the legacy `outer` run forced the whole discharge
+# into ~1 cell and got Δt≈0.22 s from the resulting spurious w. Here the source is spread over
+# --y_src metres (a few cells) with relaxation time --sig_src, both tunable, to keep Δt up (~15 s).
+# EXPERIMENTAL: expect to tune --y_src / --sig_src to balance discharge fidelity vs timestep.
 #
 # CPU smoke test:  julia --project iceplume.jl --arch=cpu --simname=cputest --stop_days=0.02
 # GPU sanity:      julia --project iceplume.jl --arch=gpu --simname=gpucheck --stop_days=0.01
+# FFT cross-check: julia --project iceplume.jl --arch=gpu --simname=fftcheck --fft=1 --stop_days=0.01
 # =====================================================================================
 
 using Oceananigans
@@ -38,17 +42,16 @@ rundir = @__DIR__
 function parse_cli()
     cli = Dict{String,Any}(
         "simname" => "control", "arch" => "auto",
-        "tide" => 0.0, "pump" => 0.0,
-        "pump_amp" => 0.5,          # A in (1 + A·sin); outerpump3 used 0.5
-        "tide_amp" => 0.0168,       # barotropic M2 velocity amplitude [m/s]
-        "M2_period" => 44700.0,     # M2 period [s]
+        "tide" => 0.0, "pump" => 0.0, "fft" => 0.0,   # fft=0 → CG (default); fft=1 → default FFT solver
+        "pump_amp" => 0.5, "tide_amp" => 0.0168, "M2_period" => 44700.0,
         "Lx" => 12937.0, "Ly" => 15039.0, "Lz" => 200.0,
-        "Nx" => 261.0, "Ny" => 296.0, "Nz" => 100.0,   # ~50 m horizontal, 2 m vertical (newer runs)
+        "Nx" => 261.0, "Ny" => 296.0, "Nz" => 100.0,
         "bathymetry" => "bottom.nc", "bathy_var" => "bottom",
+        "y_src" => 150.0, "sig_src" => 60.0, "z_src_bot" => -40.0,   # source y-width [m], relax [s], outflow-layer bottom [m]
         "stop_days" => 10.0, "output_interval" => 4320.0, "mooring_interval" => 432.0,
         "avg_interval" => 21600.0, "checkpoint_interval" => 4320.0,
         "wall_time_limit" => Inf, "outdir" => "",
-        "cfl" => 0.7, "cg_reltol" => 1e-4, "cg_maxiter" => 50.0)
+        "cfl" => 0.5, "cg_reltol" => 1e-4, "cg_maxiter" => 50.0)
     provided = Set{String}()
     for a in ARGS
         startswith(a, "--") || continue
@@ -64,11 +67,12 @@ end
 cli, provided = parse_cli()
 tide_on = cli["tide"] > 0.5
 pump_on = cli["pump"] > 0.5
+fft_on  = cli["fft"]  > 0.5
 arch = cli["arch"] == "cpu" ? CPU() : cli["arch"] == "gpu" ? GPU() : (has_cuda_gpu() ? GPU() : CPU())
-@info "Scenario" simname=cli["simname"] tide=tide_on pump=pump_on arch=arch
+@info "Saqqarleq fjord LES (closed domain, interior source)" simname=cli["simname"] tide=tide_on pump=pump_on solver=(fft_on ? "FFT" : "CG") arch=arch
 #---
 
-#+++ Grid
+#+++ Grid + bathymetry
 Lx, Ly, Lz = cli["Lx"], cli["Ly"], cli["Lz"]
 Nx, Ny, Nz = round(Int, cli["Nx"]), round(Int, cli["Ny"]), round(Int, cli["Nz"])
 if arch == CPU() && !("Nx" in provided)
@@ -78,14 +82,13 @@ end
 underlying_grid = RectilinearGrid(arch; size = (Nx, Ny, Nz),
     x = (0, Lx), y = (0, Ly), z = (-Lz, 0), halo = (4, 4, 4),
     topology = (Bounded, Bounded, Bounded))
-
-# Bathymetry: read bottom.nc, resample onto THIS grid's centers, put on the grid's device. Passing
-# an array (not a function) keeps GridFittedBottom GPU-safe at any resolution.
+# Bathymetry: read bottom.nc, use as-is if it matches the grid, else resample onto the grid centers.
+# Passing an array (not a function) keeps GridFittedBottom GPU-safe at any resolution.
 bathy_path = isabspath(cli["bathymetry"]) ? cli["bathymetry"] : joinpath(rundir, cli["bathymetry"])
 B = NCDataset(bathy_path) do ds; Array{Float64}(ds[cli["bathy_var"]][:, :]); end
 if size(B) == (Nx, Ny)
-    bottom_arr = on_architecture(arch, B)          # file already matches the grid → use as-is (exact)
-else                                                # otherwise resample onto the grid centers
+    bottom_arr = on_architecture(arch, B)
+else
     nbx, nby = size(B)
     itp = linear_interpolation((range(0, Lx; length = nbx), range(0, Ly; length = nby)), B; extrapolation_bc = Flat())
     xc = [(i-0.5)*Lx/Nx for i in 1:Nx]; yc = [(j-0.5)*Ly/Ny for j in 1:Ny]
@@ -96,17 +99,20 @@ grid = ImmersedBoundaryGrid(underlying_grid, GridFittedBottom(bottom_arr))
 @info "Grid" grid cells = Nx*Ny*Nz
 #---
 
-#+++ Constants the boundary/forcing closures capture (const ⇒ GPU-safe)
+#+++ Constants (const ⇒ GPU-safe)
 const M2 = cli["M2_period"]
 const PUMP_AMP = pump_on ? cli["pump_amp"] : 0.0
 const TIDE_AMP = tide_on ? cli["tide_amp"] : 0.0
 const LY = Ly
-const SIG = 8000.0                 # gentle far-field sponge timescale [s] (outerpump3)
-const SIG_TIDE = 100.0             # tide relaxation timescale [s] (verify vs outertide3)
-const OUTFLOW = 130 / (20 * 3500)  # background mouth outflow [m/s]
+const SIG = 8000.0                 # gentle far-field sponge [s]
+const SIG_TIDE = 100.0
+const OUTFLOW = 130 / (20 * 3500)  # mouth outflow [m/s]
+const Y_SRC = cli["y_src"]         # source band width in y [m]
+const SIG_SRC = cli["sig_src"]     # source relaxation time [s]
+const Z_SRC_BOT = cli["z_src_bot"] # bottom of the neutral-buoyancy outflow layer [m]
 #---
 
-#+++ Ambient far-field T,S (2024 cast fits; used only by the gentle mouth sponge)
+#+++ Ambient far-field T,S (2024 cast fits; used by the mouth sponge)
 @inline function T∞(z)
     if z > -40
         return 4.301e-9*z^7 + 4.213e-7*z^6 + 7.218e-6*z^5 - 0.000549*z^4 -
@@ -125,123 +131,95 @@ end
 end
 #---
 
-#+++ Plume profiles at the SOUTH boundary (ported verbatim from outerpump3)
-# Discharge velocity through the south face, nonzero only in the 9800–9900 m plume band; the
-# (1 + A·sin) factor is the tidal-pumping modulation (A = 0 for Control).
-@inline function v_p1(x, z, t)
-    if (9800 <= x <= 9900) && (-140 <= z <= 0)
-        x0, y0, x1, y1 = 0.0, 0.0, 0.0, 0.0
-        if -140 <= z <= -120
-            x0, y0, x1, y1 = -140, 0.00, -120, -0.03
-        elseif -120 <= z <= -30
-            x0, y0, x1, y1 = -120, -0.03, -30, -0.03
-        elseif z <= -17
-            x0, y0, x1, y1 = -30, -0.03, -17, 0.34
-        else
-            x0, y0, x1, y1 = -17, 0.34, 0, 0
-        end
-        return (y0 + (y1 - y0) * (z - x0) / (x1 - x0)) * (1 + PUMP_AMP * sin(2π * t / M2))
-    else
+#+++ Plume target profiles for the interior source (z-only; from outerpump3's v_p1/T_p1/S_p1,
+#    with the deep parts clamped to sensible values so the source never injects garbage below -30 m).
+@inline function v_tgt(z)
+    if z < -140 || z > 0
         return 0.0
+    elseif z <= -120
+        return (-0.03) * (z + 140) / 20                # (-140,0)→(-120,-0.03)
+    elseif z <= -30
+        return -0.03
+    elseif z <= -17
+        return -0.03 + (0.34 - (-0.03)) * (z + 30) / 13 # (-30,-0.03)→(-17,0.34)
+    else
+        return 0.34 + (0.0 - 0.34) * (z + 17) / 17       # (-17,0.34)→(0,0)
     end
 end
-# Interior reinforcement target for v just inside the boundary (time-independent).
-@inline function v_p1sponge(x, z)
-    if 9800 <= x <= 9900
-        x0, y0, x1, y1 = 0.0, 0.0, 0.0, 0.0
-        if -140 <= z <= -120
-            x0, y0, x1, y1 = -140, 0.00, -120, -0.03
-        elseif -120 < z <= -30
-            x0, y0, x1, y1 = -150, -0.03, -30, -0.03
-        elseif z <= -17
-            x0, y0, x1, y1 = -30, -0.03, -17, 0.34
-        else
-            x0, y0, x1, y1 = -17, 0.34, 0, 0
-        end
-        return y0 + (y1 - y0) * (z - x0) / (x1 - x0)
+@inline function T_tgt(z)
+    if z <= -17
+        return 1.0
+    elseif z <= -5
+        return 1.0 + (6.5 - 1.0) * (z + 17) / 12
     else
-        return 0.0
+        return 6.5 + (5.0 - 6.5) * (z + 5) / 5
     end
 end
-# South T,S value BCs: impose plume properties in the band, leave the field unchanged elsewhere.
-@inline function T_p1(x, z, t, T)
-    if (9800 <= x <= 9900) && (-140 <= z <= 0)
-        x0, y0, x1, y1 = 0.0, 0.0, 0.0, 0.0
-        if -30 <= z <= -17
-            x0, y0, x1, y1 = -30, 1, -17, 1
-        elseif -17 <= z <= -5
-            x0, y0, x1, y1 = -17, 1, -5, 6.5
-        else
-            x0, y0, x1, y1 = -5, 6.5, 0, 5
-        end
-        return y0 + (y1 - y0) * (z - x0) / (x1 - x0)
+@inline function S_tgt(z)
+    if z <= -30
+        return 31.0
+    elseif z <= -15
+        return 31.0 + (30.0 - 31.0) * (z + 30) / 15
     else
-        return T
-    end
-end
-@inline function S_p1(x, z, t, S)
-    if (9800 <= x <= 9900) && (-140 <= z <= 0)
-        x0, y0, x1, y1 = 0.0, 0.0, 0.0, 0.0
-        if -30 <= z <= -15
-            x0, y0, x1, y1 = -30, 31, -15, 30
-        else
-            x0, y0, x1, y1 = -15, 30, 0, 16
-        end
-        return y0 + (y1 - y0) * (z - x0) / (x1 - x0)
-    else
-        return S
+        return 30.0 + (16.0 - 30.0) * (z + 15) / 15
     end
 end
 #---
 
-#+++ Masks + interior sponges (ported from outerpump3)
-@inline function plume1_maskv(x, y, z)
-    (9800 <= x <= 9900) && (0 <= y <= 500) ? (500 - y) / 500 : 0.0
-end
-@inline function open_mask(x, y, z)      # deep water at the fjord mouth
-    (14700 <= y <= LY) && (z < -5) ? (y - 14700) / (LY - 14700) : 0.0
-end
-@inline function open_topmask(x, y, z)   # top 20 m at the fjord mouth
-    (-20 <= z <= 0) && (14700 <= y <= LY) ? (y - 14700) / (LY - 14700) : 0.0
-end
+#+++ Interior source region + mouth sponges (CLOSED domain — no open boundary)
+# The fjord model receives the plume as a lateral OUTFLOW at the neutral-buoyancy depth (~ -17 m,
+# where v_tgt peaks), NOT a grounding-line discharge — the LES does the rising. So the source is a
+# band at the glacier face (small y, plume x-window), confined to the outflow layer z ≥ Z_SRC_BOT,
+# and spread over Y_SRC metres so the flux isn't crammed into one cell. Below Z_SRC_BOT the water is
+# left at ambient (no plume T/S, so no spurious deep buoyancy anomaly).
+@inline in_src(x, y, z) = (9800 <= x <= 9900) && (y <= Y_SRC) && (z >= Z_SRC_BOT)
+@inline open_mask(x, y, z)    = (14700 <= y <= LY) && (z < -5)  ? (y - 14700)/(LY - 14700) : 0.0
+@inline open_topmask(x, y, z) = (-20 <= z <= 0) && (14700 <= y <= LY) ? (y - 14700)/(LY - 14700) : 0.0
 
 @inline function sponge_v(x, y, z, t, v)
-    reinforce = -plume1_maskv(x, y, z) / 10 * (v - v_p1sponge(x, z))
-    outflow   = -open_topmask(x, y, z) / SIG * (v - OUTFLOW)
-    tide      = TIDE_AMP > 0 ? -open_mask(x, y, z) / SIG_TIDE * (v - TIDE_AMP * sin(2π * t / M2)) : zero(v)
-    return reinforce + outflow + tide
+    src  = in_src(x, y, z) ? -(v - v_tgt(z) * (1 + PUMP_AMP*sin(2π*t/M2))) / SIG_SRC : zero(v)
+    out  = -open_topmask(x, y, z) / SIG * (v - OUTFLOW)
+    tide = TIDE_AMP > 0 ? -open_mask(x, y, z) / SIG_TIDE * (v - TIDE_AMP*sin(2π*t/M2)) : zero(v)
+    return src + out + tide
 end
-@inline sponge_T(x, y, z, t, T) = -open_mask(x, y, z) / SIG * (T - T∞(z))
-@inline sponge_S(x, y, z, t, S) = -open_mask(x, y, z) / SIG * (S - S∞(z))
+@inline function sponge_T(x, y, z, t, T)
+    src = in_src(x, y, z) ? -(T - T_tgt(z)) / SIG_SRC : zero(T)
+    return src - open_mask(x, y, z) / SIG * (T - T∞(z))
+end
+@inline function sponge_S(x, y, z, t, S)
+    src = in_src(x, y, z) ? -(S - S_tgt(z)) / SIG_SRC : zero(S)
+    return src - open_mask(x, y, z) / SIG * (S - S∞(z))
+end
 forcing = (v = Forcing(sponge_v, field_dependencies = :v),
            T = Forcing(sponge_T, field_dependencies = :T),
            S = Forcing(sponge_S, field_dependencies = :S))
 #---
 
-#+++ Boundary conditions: plume through the SOUTH open boundary; no-slip on the immersed bathymetry
+#+++ Boundary conditions: fully CLOSED (walls + immersed bottom). No open boundary → CG-friendly.
 u_bcs = FieldBoundaryConditions(immersed = ValueBoundaryCondition(0))
-v_bcs = FieldBoundaryConditions(immersed = ValueBoundaryCondition(0), south = OpenBoundaryCondition(v_p1))
+v_bcs = FieldBoundaryConditions(immersed = ValueBoundaryCondition(0))
 w_bcs = FieldBoundaryConditions()
-T_bcs = FieldBoundaryConditions(top = FluxBoundaryCondition(0), east = FluxBoundaryCondition(0),
-                                south = ValueBoundaryCondition(T_p1, field_dependencies = (:T,)))
-S_bcs = FieldBoundaryConditions(top = FluxBoundaryCondition(0), east = FluxBoundaryCondition(0),
-                                south = ValueBoundaryCondition(S_p1, field_dependencies = (:S,)))
+T_bcs = FieldBoundaryConditions(top = FluxBoundaryCondition(0))
+S_bcs = FieldBoundaryConditions(top = FluxBoundaryCondition(0))
 boundary_conditions = (u = u_bcs, v = v_bcs, w = w_bcs, T = T_bcs, S = S_bcs)
 #---
 
-#+++ Model — QAB2, NO closure (WENO implicit LES), hydrostatic-anomaly split, CG Poisson solver
+#+++ Model — QAB2 (1 pressure solve/step), WENO implicit LES. Pressure solver: CG by default (the
+#    immersed-bottom tracer fix); default FFT with --fft=1. Everything else is identical.
 eos = LinearEquationOfState(thermal_expansion = 3.87e-5, haline_contraction = 7.86e-4)
-model = NonhydrostaticModel(grid;
-    advection = WENO(order = 5),
-    timestepper = :RungeKutta3,      # RK3 for open-boundary stability (3 CG solves/step); keeps the CG immersed-boundary fix
-    tracers = (:T, :S),
-    buoyancy = SeawaterBuoyancy(equation_of_state = eos),
-    coriolis = FPlane(f = 1.22e-4),
-    forcing = forcing,
-    boundary_conditions = boundary_conditions,
-    pressure_solver = ConjugateGradientPoissonSolver(grid;
-        reltol = cli["cg_reltol"], maxiter = round(Int, cli["cg_maxiter"])))
-@info "Model built" model
+common = (advection = WENO(order = 5),
+          timestepper = :QuasiAdamsBashforth2,
+          tracers = (:T, :S),
+          buoyancy = SeawaterBuoyancy(equation_of_state = eos),
+          coriolis = FPlane(f = 1.22e-4),
+          forcing = forcing,
+          boundary_conditions = boundary_conditions)
+model = fft_on ?
+    NonhydrostaticModel(grid; common...) :
+    NonhydrostaticModel(grid; common...,
+        pressure_solver = ConjugateGradientPoissonSolver(grid;
+            reltol = cli["cg_reltol"], maxiter = round(Int, cli["cg_maxiter"])))
+@info "Model built (closed domain, interior source; $(fft_on ? "FFT" : "CG") solver)" model
 #---
 
 #+++ Initial condition: ambient T,S + small velocity noise
@@ -262,7 +240,6 @@ simulation.callbacks[:wizard] = Callback(
     IterationInterval(2))
 using Oceanostics.ProgressMessengers: BasicTimeMessenger
 simulation.callbacks[:progress] = Callback(BasicTimeMessenger(), IterationInterval(10))
-# max|u,v,w| + per-direction CFL, to see what limits Δt
 Δx, Δy, Δz = Lx/Nx, Ly/Ny, Lz/Nz
 function velmsg(sim)
     vel = sim.model.velocities
@@ -284,10 +261,10 @@ outdir = isempty(cli["outdir"]) ? joinpath(rundir, "output") : cli["outdir"]
 mkpath(outdir)
 pickup = any(startswith("$(ckpt)_iteration"), readdir(outdir)); overwrite = !pickup
 pickup && @warn "Checkpoint for $prefix found in $outdir — resuming."
-gattrs = Dict("scenario" => (pump_on ? (tide_on ? "tide+pump" : "pump") : (tide_on ? "tide" : "control")))
-
+gattrs = Dict("scenario" => (pump_on ? (tide_on ? "tide+pump" : "pump") : (tide_on ? "tide" : "control")),
+              "solver" => (fft_on ? "FFT" : "CG"), "y_src" => Y_SRC, "sig_src" => SIG_SRC)
 @inline ci(i, N) = clamp(i, 1, N)
-moor_ix = ci(round(Int, 9950.0 / Lx * Nx), Nx)   # ≈ original mooring physical location
+moor_ix = ci(round(Int, 9950.0 / Lx * Nx), Nx)
 moor_iy = ci(round(Int, 324.0 / Ly * Ny), Ny)
 for (name, k) in Dict("face1"=>32, "face2"=>50, "face3"=>70, "face4"=>85, "face5"=>Nz-1)
     simulation.output_writers[Symbol(name)] = NetCDFWriter(model, outputs;

@@ -1,15 +1,17 @@
 #!/bin/bash -l
 # setup_casper.sh — one-time environment setup on Casper (NCAR), run from the repo directory on a
-# LOGIN node (needs network for Pkg). Uses the same modules as your production runs and resolves
-# the Oceananigans 0.109 environment fresh (no Manifest is shipped).
+# LOGIN node (needs network for Pkg). Resolves the Oceananigans 0.109 environment fresh (no
+# Manifest is shipped).
 #
 #   cd /glade/work/$USER/saqqarleq-fjord-les
 #   ./setup_casper.sh
 set -e
 cd "$(dirname "$0")"
 
+# No cuda module: CUDA.jl ships its own toolkit and talks to the node driver directly. Loading the
+# system cuda module can shadow that and cause version mismatches.
 module purge
-module load ncarenv/23.10 cuda
+module load ncarenv/23.10
 module list
 
 # Use a juliaup Julia >= 1.10.11 (NOT the julia/1.10.5 module — its Pkg resolver writes a broken
@@ -29,7 +31,8 @@ echo
 echo "Environment ready. Quick GPU sanity check on a compute node (a couple of minutes):"
 echo "    qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=a100 -l walltime=00:30:00"
 echo "    # then on the node:"
-echo "    module load ncarenv/23.10 cuda"
+echo "    module purge; module load ncarenv/23.10"
 echo "    export JULIA_DEPOT_PATH=/glade/work/\$USER/.julia"
+echo "    export CUDA_VISIBLE_DEVICES=0   # Casper hands it out as a GPU UUID this CUDA.jl can't parse"
 echo "    $JULIA --project iceplume.jl --arch=gpu --simname=gpucheck --stop_days=0.01"
 echo "Then submit the real run:  qsub -v CASE=control submit_casper.sh"

@@ -10,31 +10,32 @@
 #PBS -M kenzhao@unc.edu
 #PBS -m abe
 #
-# Close to your outerpump3/outertide3 runs (ncarenv 23.10 + cuda + peak-memusage, 40 GB, 24 h),
-# but on an A100 with a juliaup Julia >= 1.10.11, and iceplume.jl now uses the
-# ConjugateGradientPoissonSolver (cg_reltol 1e-4) at ~30 m horizontal. Pick the scenario with -v CASE=:
+# Saqqarleq fjord LES on Casper. One script, iceplume.jl: closed domain, interior plume source at
+# neutral buoyancy, ConjugateGradientPoissonSolver by default (the immersed-bottom tracer fix;
+# validated at Δt ~ 15 s). Add EXTRA="--fft=1" for the FFT cross-check (same run, default solver).
 #
-#     qsub -v CASE=control  submit_casper.sh     # constant discharge, no tide   (default)
-#     qsub -v CASE=tide     submit_casper.sh     # constant discharge + M2 tide
-#     qsub -v CASE=pump     submit_casper.sh     # tidally modulated discharge
-#     qsub -v CASE=tidepump submit_casper.sh     # both
+#     qsub -v CASE=control  submit_casper.sh                    # steady discharge, no tide (default)
+#     qsub -v CASE=tide     submit_casper.sh                    # + external M2 tide
+#     qsub -v CASE=pump     submit_casper.sh                    # tidally modulated discharge
+#     qsub -v CASE=control,EXTRA=--fft=1 submit_casper.sh       # FFT solver instead of CG
 #
-# Account is UGIT0046 (your current plume/DNS allocation). Everything else matches the originals.
+# Julia: a juliaup >= 1.10.11 (NOT the julia/1.10.5 module — its Pkg resolver writes a broken
+# Manifest). No cuda module: CUDA.jl bundles its own toolkit and uses the node driver. And we pin
+# CUDA_VISIBLE_DEVICES=0 because Casper hands it out as a GPU UUID that this CUDA.jl doesn't parse.
 
 cd "$PBS_O_WORKDIR" || exit 1
 mkdir -p logs
 
-# Exactly the module stack your Dec-2024 run used (proven to work on Casper).
-# NOTE: use a juliaup Julia >= 1.10.11, NOT the julia/1.10.5 module (its Pkg resolver writes a
-# broken Manifest — KeyError "GPUArraysCore"). Ovall26 used 1.10.11 for the same reason.
 module purge
 module load ncarenv/23.10
-module load cuda
 module load peak-memusage
 module list
 
 export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-/glade/work/$USER/.julia}"
+export CUDA_VISIBLE_DEVICES=0
 JULIA="${JULIA:-$HOME/.juliaup/bin/julia}"
+SCRIPT="${SCRIPT:-iceplume.jl}"
+EXTRA="${EXTRA:-}"   # e.g. EXTRA="--fft=1" to use the FFT solver instead of CG
 
 CASE=${CASE:-control}
 case "$CASE" in
@@ -45,13 +46,12 @@ case "$CASE" in
   *) echo "unknown CASE='$CASE' (control|tide|pump|tidepump)"; exit 1 ;;
 esac
 
-# Outputs + checkpoints for this case (kept out of the git repo; auto-resumes if resubmitted).
+# Outputs + checkpoints per case (off the git repo; auto-resumes if resubmitted with the same CASE).
 OUTDIR="${OUTDIR:-$PBS_O_WORKDIR/output/$CASE}"
 mkdir -p "$OUTDIR"
 
-# --wall_time_limit stops cleanly ~30 min before the 24 h PBS wall so the checkpoint is complete;
-# resubmitting the same CASE then picks up from it. --stop_days=10 matches the original run length.
-peak_memusage $JULIA --project iceplume.jl \
-    --simname="$CASE" $FLAGS --arch=gpu --outdir="$OUTDIR" \
+# --wall_time_limit stops cleanly ~30 min before the 24 h PBS wall so the checkpoint is complete.
+peak_memusage $JULIA --project "$SCRIPT" \
+    --simname="$CASE" $FLAGS $EXTRA --arch=gpu --outdir="$OUTDIR" \
     --stop_days=10 --wall_time_limit=23.5 \
     2>&1 | tee logs/${CASE}.out

@@ -1,14 +1,18 @@
 # Running a scenario on Casper (NCAR)
 
-Close to your `outerpump3`/`outertide3` runs (ncarenv 23.10 + cuda + peak-memusage, 40 GB, 24 h),
-but on an A100 with a juliaup Julia >= 1.10.11 and the `ConjugateGradientPoissonSolver` in
-`iceplume.jl` (`cg_reltol` 1e-4, ~30 m horizontal grid). Below runs the **control** case; swap
-`CASE=control` for `tide`, `pump`, or `tidepump`.
+Production runs `iceplume.jl`: closed domain, interior plume source at neutral buoyancy,
+`ConjugateGradientPoissonSolver` by default (the immersed-bottom tracer fix), validated stepping
+stably at Δt ~ 15 s on an A100. Add `EXTRA=--fft=1` for the FFT cross-check (same run, default
+solver). Below runs the **control** case; swap `CASE=control` for `tide`, `pump`, or `tidepump`.
+
+Environment vs your old `outerpump3`/`outertide3` runs: same ncarenv 23.10 + peak-memusage, but
+**A100 instead of v100**, a **juliaup Julia >= 1.10.11** (not the julia/1.10.5 module), and **no
+cuda module** (CUDA.jl brings its own toolkit).
 
 ## 0. Allocation
 
-`submit_casper.sh` and the interactive command below use `-A UGIT0046` (your current plume/DNS
-allocation). Everything else matches the original runs.
+`submit_casper.sh` and the interactive command below use `-A UGIT0046`. Everything else matches the
+original runs.
 
 ## 1. Copy the code to Casper (run on your laptop)
 
@@ -48,12 +52,14 @@ Confirms it builds and steps on the GPU with the CG solver before spending queue
 qsub -I -A UGIT0046 -q casper -l select=1:ncpus=1:mem=40GB:ngpus=1:gpu_type=a100 -l walltime=00:30:00
 # on the compute node:
 cd /glade/work/kenzhao/saqqarleq-fjord-les
-module purge; module load ncarenv/23.10 cuda
+module purge; module load ncarenv/23.10
 export JULIA_DEPOT_PATH=/glade/work/kenzhao/.julia
+export CUDA_VISIBLE_DEVICES=0   # Casper hands it out as a GPU UUID this CUDA.jl can't parse
 ~/.juliaup/bin/julia --project iceplume.jl --arch=gpu --simname=gpucheck --stop_days=0.01
 ```
 
-Watch for: "Model built", the CG solver converging, `max|u|` growing (not NaN). Then `exit`.
+Watch for: "Model built", the CG solver converging, `max|u|` growing to a physical ~0.2–0.3 m/s
+(not NaN, not tens of m/s). Then `exit`.
 
 ## 4. Submit the production run
 
@@ -64,6 +70,12 @@ qstat -u kenzhao
 ```
 
 One A100 job, 10 model days or a clean stop ~30 min before the 24 h wall (whichever first).
+`submit_casper.sh` already sets `CUDA_VISIBLE_DEVICES=0` and skips the cuda module.
+
+**First leg: run it short.** Before committing the full 10 days, launch with `--stop_days` small
+(edit the flag in `submit_casper.sh`, or run one interactively) and plot the plume with
+`plot_quicklook.py` to confirm the outflow is sitting at the right depth on the bathymetry. Then
+resubmit for the full run.
 
 ## 5. Monitor
 
@@ -71,9 +83,9 @@ One A100 job, 10 model days or a clean stop ~30 min before the 24 h wall (whiche
 tail -f logs/control.out
 ```
 
-Healthy signs: CFL staying < 0.5, the CG Poisson solver converging each step, no NaNs. Outputs
-land in `output/control/` (`control_face*.nc`, `control_mooring.nc`, `control_xsect.nc`,
-`control_timeavg.nc`) plus `checkpoint_control_*`.
+Healthy signs: CFL staying < 0.5, the CG Poisson solver converging each step, no NaNs, `max|u|`
+around 0.2–0.3 m/s. Outputs land in `output/control/` (`control_face*.nc`, `control_mooring.nc`,
+`control_xsect.nc`, `control_timeavg.nc`) plus `checkpoint_control_*`.
 
 ## 6. If it hits the wall before 10 days, resume
 
