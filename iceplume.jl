@@ -237,7 +237,6 @@ model = NonhydrostaticModel(grid;
     tracers = (:T, :S),
     buoyancy = SeawaterBuoyancy(equation_of_state = eos),
     coriolis = FPlane(f = 1.22e-4),
-    hydrostatic_pressure_anomaly = CenterField(grid),
     forcing = forcing,
     boundary_conditions = boundary_conditions,
     pressure_solver = ConjugateGradientPoissonSolver(grid;
