@@ -7,7 +7,7 @@
 # 40× too small. The newer runs inject the plume through the SOUTH open boundary (smooth inflow),
 # use gentle far-field sponges (σ = 8000 s), no subgrid closure, and a hydrostatic-pressure-anomaly
 # split. Here we keep all of that AND add the ConjugateGradientPoissonSolver (the immersed-boundary
-# tracer fix), on QuasiAdamsBashforth2 (1 pressure solve/step, cheaper with CG than RK3's 3).
+# tracer fix), on RungeKutta3 for open-boundary stability (3 CG solves/step is the price).
 #
 # Scenarios (flags):
 #   Control      (default)    steady discharge, no tide
@@ -233,7 +233,7 @@ boundary_conditions = (u = u_bcs, v = v_bcs, w = w_bcs, T = T_bcs, S = S_bcs)
 eos = LinearEquationOfState(thermal_expansion = 3.87e-5, haline_contraction = 7.86e-4)
 model = NonhydrostaticModel(grid;
     advection = WENO(order = 5),
-    timestepper = :QuasiAdamsBashforth2,
+    timestepper = :RungeKutta3,      # RK3 for open-boundary stability (3 CG solves/step); keeps the CG immersed-boundary fix
     tracers = (:T, :S),
     buoyancy = SeawaterBuoyancy(equation_of_state = eos),
     coriolis = FPlane(f = 1.22e-4),
