@@ -43,6 +43,7 @@ function parse_cli()
     cli = Dict{String,Any}(
         "simname" => "control", "arch" => "auto",
         "tide" => 0.0, "pump" => 0.0, "fft" => 0.0,   # fft=0 → CG (default); fft=1 → default FFT solver
+        "closure" => "none", "nu_h" => 1.0,           # dissipation: none (default, matches stable outerpump) | const | smag | amd
         "pump_amp" => 0.5, "tide_amp" => 0.0168, "M2_period" => 44700.0,
         "Lx" => 12937.0, "Ly" => 15039.0, "Lz" => 200.0,
         "Nx" => 261.0, "Ny" => 296.0, "Nz" => 100.0,
@@ -204,14 +205,27 @@ S_bcs = FieldBoundaryConditions(top = FluxBoundaryCondition(0))
 boundary_conditions = (u = u_bcs, v = v_bcs, w = w_bcs, T = T_bcs, S = S_bcs)
 #---
 
-#+++ Model — QAB2 (1 pressure solve/step), WENO implicit LES. Pressure solver: CG by default (the
-#    immersed-bottom tracer fix); default FFT with --fft=1. Everything else is identical.
+#+++ Model — RungeKutta3 + hydrostatic-pressure-anomaly split (the numerics of the stable outerpump
+#    runs), WENO implicit LES, no closure. Pressure solver: CG by default (the immersed-bottom tracer
+#    fix); default FFT with --fft=1.
 eos = LinearEquationOfState(thermal_expansion = 3.87e-5, haline_contraction = 7.86e-4)
+# Stability comes from matching the numerics of the proven-stable outerpump runs: RungeKutta3 and
+# the hydrostatic-pressure-anomaly split (both set in the model below). Those runs used NO closure,
+# so the default is none. The closures below are kept only for experiments — and note smag/amd build
+# a runaway eddy viscosity at the sharp interior source and blow up there (~30 min), so avoid them
+# in this closed-domain setup; a constant horizontal viscosity (const) is the only safe extra sink.
+les_closure = cli["closure"] == "none"  ? nothing :
+              cli["closure"] == "const" ? HorizontalScalarDiffusivity(ν = cli["nu_h"], κ = cli["nu_h"]) :
+              cli["closure"] == "smag"  ? SmagorinskyLilly() :
+              cli["closure"] == "amd"   ? AnisotropicMinimumDissipation() :
+              error("unknown --closure=$(cli["closure"]) (none|const|smag|amd)")
 common = (advection = WENO(order = 5),
-          timestepper = :QuasiAdamsBashforth2,
+          timestepper = :RungeKutta3,                    # matches the stable outerpump runs (3 solves/step)
           tracers = (:T, :S),
           buoyancy = SeawaterBuoyancy(equation_of_state = eos),
           coriolis = FPlane(f = 1.22e-4),
+          hydrostatic_pressure_anomaly = CenterField(grid),  # split off hydrostatic p; CG solves the rest
+          closure = les_closure,
           forcing = forcing,
           boundary_conditions = boundary_conditions)
 model = fft_on ?
@@ -219,7 +233,7 @@ model = fft_on ?
     NonhydrostaticModel(grid; common...,
         pressure_solver = ConjugateGradientPoissonSolver(grid;
             reltol = cli["cg_reltol"], maxiter = round(Int, cli["cg_maxiter"])))
-@info "Model built (closed domain, interior source; $(fft_on ? "FFT" : "CG") solver)" model
+@info "Model built (closed domain, interior source; $(fft_on ? "FFT" : "CG") solver; closure=$(cli["closure"]))" model
 #---
 
 #+++ Initial condition: ambient T,S + small velocity noise
@@ -236,17 +250,28 @@ wtl = cli["wall_time_limit"]
 simulation = Simulation(model; Δt = 0.5, stop_time = cli["stop_days"] * days,
                         wall_time_limit = isfinite(wtl) ? wtl * 3600 : Inf)
 simulation.callbacks[:wizard] = Callback(
-    TimeStepWizard(cfl = cli["cfl"], max_change = 1.05, min_change = 0.2, max_Δt = 30.0),
+    TimeStepWizard(cfl = cli["cfl"], diffusive_cfl = 0.5, max_change = 1.05, min_change = 0.2, max_Δt = 30.0),
     IterationInterval(2))
 using Oceanostics.ProgressMessengers: BasicTimeMessenger
 simulation.callbacks[:progress] = Callback(BasicTimeMessenger(), IterationInterval(10))
 Δx, Δy, Δz = Lx/Nx, Ly/Ny, Lz/Nz
+# Diagnostics (physics-neutral): KE tells us if energy is steadily accumulating in the closed box;
+# max|div u| tells us whether the CG projection is actually enforcing incompressibility (a growing
+# residual divergence points at the solver / a mass-balance inconsistency); the location of max|u|
+# tells us WHERE it destabilizes (the interior source, a steep immersed-bottom cell, or the mouth).
+div_u = Field(∂x(u) + ∂y(v) + ∂z(w))
 function velmsg(sim)
     vel = sim.model.velocities
-    um, vm, wm = maximum(abs, interior(vel.u)), maximum(abs, interior(vel.v)), maximum(abs, interior(vel.w))
+    ui = Array(interior(vel.u))
+    umax, uidx = findmax(abs, ui)
+    i, j, k = Tuple(uidx)
+    xL, yL, zL = (i-0.5)*Δx, (j-0.5)*Δy, -Lz + (k-0.5)*Δz
+    vm = maximum(abs, interior(vel.v)); wm = maximum(abs, interior(vel.w))
+    ke = 0.5 * (mean(interior(vel.u).^2) + mean(interior(vel.v).^2) + mean(interior(vel.w).^2))
+    compute!(div_u); dmax = maximum(abs, interior(div_u))
     dt = sim.Δt
-    @info @sprintf("   max|u,v,w|=(%.3f, %.3f, %.3f)  CFL(x,y,z)=(%.2f, %.2f, %.2f)",
-                   um, vm, wm, dt*um/Δx, dt*vm/Δy, dt*wm/Δz)
+    @info @sprintf("   max|u,v,w|=(%.3f, %.3f, %.3f) CFL=(%.2f, %.2f, %.2f)  KE=%.3e  max|div|=%.2e  umax@(i=%d,j=%d,k=%d; x=%.0f,y=%.0f,z=%.0f)",
+                   umax, vm, wm, dt*umax/Δx, dt*vm/Δy, dt*wm/Δz, ke, dmax, i, j, k, xL, yL, zL)
 end
 simulation.callbacks[:vel] = Callback(velmsg, IterationInterval(10))
 #---
@@ -262,7 +287,7 @@ mkpath(outdir)
 pickup = any(startswith("$(ckpt)_iteration"), readdir(outdir)); overwrite = !pickup
 pickup && @warn "Checkpoint for $prefix found in $outdir — resuming."
 gattrs = Dict("scenario" => (pump_on ? (tide_on ? "tide+pump" : "pump") : (tide_on ? "tide" : "control")),
-              "solver" => (fft_on ? "FFT" : "CG"), "y_src" => Y_SRC, "sig_src" => SIG_SRC)
+              "solver" => (fft_on ? "FFT" : "CG"), "closure" => cli["closure"], "y_src" => Y_SRC, "sig_src" => SIG_SRC)
 @inline ci(i, N) = clamp(i, 1, N)
 moor_ix = ci(round(Int, 9950.0 / Lx * Nx), Nx)
 moor_iy = ci(round(Int, 324.0 / Ly * Ny), Ny)

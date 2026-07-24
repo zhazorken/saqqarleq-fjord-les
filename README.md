@@ -17,8 +17,7 @@ same architecture works with either pressure solver.
 `iceplume.jl` uses the `ConjugateGradientPoissonSolver` **by default**. It enforces the immersed
 no-normal-flow condition in the pressure projection, which removes the spurious near-bathymetry
 tracer signal that the FFT solver produced with the `GridFittedBottom` immersed boundary. Tune it
-with `--cg_reltol` and `--cg_maxiter`. Validated stepping stably at Δt ~ 15 s on an A100 with
-physical velocities (~0.2–0.3 m/s).
+with `--cg_reltol` and `--cg_maxiter`.
 
 Pass `--fft=1` to use Oceananigans' default FFT pressure solve instead. That runs the exact same
 closed-domain, interior-source configuration; only the pressure projection changes. It carries the
@@ -35,6 +34,17 @@ over `--y_src` metres, balanced by an outflow sponge at the fjord mouth. This is
 solver (and its immersed-bottom fix) run at all, and the FFT mode shares it so the two are identical
 apart from the solver.
 
+## Numerics
+
+Time stepping is `RungeKutta3` with the hydrostatic-pressure-anomaly split and **no explicit
+closure** — the same numerics as the stable `outerpump`/`outertide` runs — combined with the CG
+pressure solve. WENO(5) provides the only interior dissipation. This runs all four 10-day scenarios
+stably at Δt ~ 13–15 s on an A100 with physical velocities (~0.3 m/s). A constant horizontal
+viscosity is available via `--closure=const --nu_h=<ν>` if a closed-domain run ever needs an extra
+grid-scale sink, but the default is `--closure=none` to match the reference runs. (Strain-based LES
+closures such as Smagorinsky/AMD are *not* recommended here — they build a runaway eddy viscosity at
+the sharp interior source and blow up.)
+
 ## Scenarios
 
 | scenario     | flags                | description                                            |
@@ -47,6 +57,30 @@ apart from the solver.
 Default modulation `A = 0.5` (`--pump_amp`, matching `outerpump3`), M2 period `T = 44700 s`
 (`--M2_period`), tidal velocity amplitude `0.0168 m/s` (`--tide_amp`, matching `outertide3`).
 With `--tide=0 --pump=0` the forcing reproduces the original Control run.
+
+## Results
+
+Four-scenario comparison, generated with `compare_scenarios.py`
+(`python compare_scenarios.py --dir output --out figures`). Figures below are a ~4-day preview.
+
+Virtual-mooring along-fjord velocity, the near-plume internal-tide signal: the outflow tongue near
+−45 m is steady under Control, picks up M2 variability under Tide, and pulses on the tidal period
+under Pump and Tide+Pump.
+
+![Mooring along-fjord velocity, four scenarios](figures/compare_mooring_v.png)
+
+Virtual-mooring salinity over the same period:
+
+![Mooring salinity, four scenarios](figures/compare_mooring_S.png)
+
+Along-fjord sections (final snapshot): the fresh, buoyant plume rides near the surface over the
+salty deep basin, with the sill at y ≈ 0.8 km. No grid-scale noise in the interior.
+
+![Along-fjord velocity section](figures/compare_section_v.png)
+
+![Along-fjord salinity section](figures/compare_section_S.png)
+
+![Along-fjord temperature section](figures/compare_section_T.png)
 
 ## Running
 
@@ -67,7 +101,8 @@ qsub -v CASE=control,EXTRA=--fft=1 submit_casper.sh
 Outputs (`*_face*.nc` z-slices, `*_mooring.nc` virtual-mooring column, `*_xsect.nc` along-fjord
 section, `*_timeavg.nc` 6 h average) and checkpoints are written to `--outdir` (default
 `./output`, kept out of the repo). Runs auto-resume from a checkpoint if resubmitted with the
-same `--simname`.
+same `--simname`. Plot a finished run with `plot_quicklook.py`, or compare scenarios with
+`compare_scenarios.py`.
 
 ## Key flags
 
@@ -77,6 +112,7 @@ same `--simname`.
 | `--arch` | `auto` | `cpu`, `gpu`, or auto-detect |
 | `--tide` / `--pump` | `0` / `0` | scenario switches |
 | `--fft` | `0` | `1` = default FFT pressure solve; `0` = CG (immersed-bottom fix) |
+| `--closure` / `--nu_h` | `none` / `1.0` | interior dissipation: `none` (default) or `const` (horizontal ν=κ=`nu_h` [m²/s]) |
 | `--pump_amp` | `0.5` | discharge modulation fraction A (matches outerpump3) |
 | `--tide_amp` | `0.0168` | barotropic M2 velocity amplitude [m/s] (matches outertide3) |
 | `--M2_period` | `44700` | tidal period [s] (12.42 h) |
@@ -91,8 +127,9 @@ same `--simname`.
 
 ## Inputs
 
-`bottom.nc` (committed) is the Saqqarleq bathymetry as negative depths on the model grid; it is
-loaded into a 2-D interpolant so the same file works at any resolution.
+`bottom.nc` (committed) is the Saqqarleq bathymetry as negative depths on the model grid (261 × 296,
+~50 m spacing, with `xC`/`yC` coordinate arrays); it is loaded into a 2-D interpolant so the same
+file works at any resolution.
 
 ## Caveats
 
@@ -102,7 +139,7 @@ loaded into a 2-D interpolant so the same file works at any resolution.
 - The interior source is EXPERIMENTAL in one respect: `--y_src`/`--sig_src` set how concentrated it
   is, which trades discharge fidelity against timestep. Too concentrated a source drives spurious
   vertical velocity and collapses Δt (the legacy `outer` run forced the discharge into ~1 cell and
-  got Δt ≈ 0.22 s). The defaults spread it over a few cells and step at ~15 s.
+  got Δt ≈ 0.22 s). The defaults spread it over a few cells and step at ~13–15 s.
 - Do a CPU smoke test and a short GPU sanity run, then plot the plume placement, before launching a
   production job.
 
