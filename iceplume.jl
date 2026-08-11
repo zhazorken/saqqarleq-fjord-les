@@ -48,7 +48,7 @@ function parse_cli()
         "Lx" => 12937.0, "Ly" => 15039.0, "Lz" => 200.0,
         "Nx" => 261.0, "Ny" => 296.0, "Nz" => 100.0,
         "bathymetry" => "bottom.nc", "bathy_var" => "bottom",
-        "y_src" => 150.0, "sig_src" => 60.0, "z_src_bot" => -40.0,   # source y-width [m], relax [s], outflow-layer bottom [m]
+        "y_src" => 150.0, "sig_src" => 60.0, "z_src_bot" => -40.0, "src_gain" => 1.0,   # source y-width [m], relax [s], outflow-layer bottom [m]
         "stop_days" => 10.0, "output_interval" => 4320.0, "mooring_interval" => 432.0,
         "avg_interval" => 21600.0, "checkpoint_interval" => 4320.0,
         "wall_time_limit" => Inf, "outdir" => "",
@@ -111,6 +111,7 @@ const OUTFLOW = 130 / (20 * 3500)  # mouth outflow [m/s]
 const Y_SRC = cli["y_src"]         # source band width in y [m]
 const SIG_SRC = cli["sig_src"]     # source relaxation time [s]
 const Z_SRC_BOT = cli["z_src_bot"] # bottom of the neutral-buoyancy outflow layer [m]
+const SRC_GAIN  = cli["src_gain"]  # multiplier on target outflow speed v_tgt (1.0 = unchanged; >1 = stronger/more concentrated)
 #---
 
 #+++ Ambient far-field T,S (2024 cast fits; used by the mouth sponge)
@@ -178,7 +179,7 @@ end
 @inline open_topmask(x, y, z) = (-20 <= z <= 0) && (14700 <= y <= LY) ? (y - 14700)/(LY - 14700) : 0.0
 
 @inline function sponge_v(x, y, z, t, v)
-    src  = in_src(x, y, z) ? -(v - v_tgt(z) * (1 + PUMP_AMP*sin(2π*t/M2))) / SIG_SRC : zero(v)
+    src  = in_src(x, y, z) ? -(v - SRC_GAIN * v_tgt(z) * (1 + PUMP_AMP*sin(2π*t/M2))) / SIG_SRC : zero(v)
     out  = -open_topmask(x, y, z) / SIG * (v - OUTFLOW)
     tide = TIDE_AMP > 0 ? -open_mask(x, y, z) / SIG_TIDE * (v - TIDE_AMP*sin(2π*t/M2)) : zero(v)
     return src + out + tide
@@ -287,7 +288,7 @@ mkpath(outdir)
 pickup = any(startswith("$(ckpt)_iteration"), readdir(outdir)); overwrite = !pickup
 pickup && @warn "Checkpoint for $prefix found in $outdir — resuming."
 gattrs = Dict("scenario" => (pump_on ? (tide_on ? "tide+pump" : "pump") : (tide_on ? "tide" : "control")),
-              "solver" => (fft_on ? "FFT" : "CG"), "closure" => cli["closure"], "y_src" => Y_SRC, "sig_src" => SIG_SRC)
+              "solver" => (fft_on ? "FFT" : "CG"), "closure" => cli["closure"], "y_src" => Y_SRC, "sig_src" => SIG_SRC, "z_src_bot" => Z_SRC_BOT, "src_gain" => SRC_GAIN)
 @inline ci(i, N) = clamp(i, 1, N)
 moor_ix = ci(round(Int, 9950.0 / Lx * Nx), Nx)
 moor_iy = ci(round(Int, 324.0 / Ly * Ny), Ny)
